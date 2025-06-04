@@ -1,13 +1,17 @@
-# ファイル名: .github/workflows/convert_s3m_to_flac.yml
-name: LZH→S3M→FLAC 変換ワークフロー
+name: LZH→ZIP→S3M/IT→FLAC 変換ワークフロー
 
-# 手動トリガー（必要に応じて push や pull_request に変更）
+# 手動トリガー（workflow_dispatch）でURLを指定可能
 on:
   workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'ダウンロードしたいファイルのURL（オプション）'
+        required: false
+        default: ''
 
 jobs:
   convert-and-commit:
-    name: LZH 解凍・S3M→FLAC 変換・コミット
+    name: ダウンロード＋LZH/ZIP 解凍・S3M/IT→FLAC 変換・コミット
     runs-on: ubuntu-latest
 
     steps:
@@ -17,66 +21,85 @@ jobs:
         with:
           persist-credentials: true  # 後続の git push に必要
 
-      # 2. 必要なツール（p7zip, ffmpeg）をインストール
+      # 2. もし URL が指定されていれば、そのファイルをダウンロード
+      - name: Download file from provided URL
+        if: ${{ github.event.inputs.target_url != '' }}
+        run: |
+          mkdir -p downloaded
+          url="${{ github.event.inputs.target_url }}"
+          filename=$(basename "$url")
+          echo "Downloading: $url → downloaded/$filename"
+          curl -L "$url" -o "downloaded/$filename"
+          # ダウンロードしたファイルをリポジトリ直下にもコピーして、以降の解凍ステップで見つかるようにする
+          cp "downloaded/$filename" .
+
+      # 3. 必要なツール（p7zip, unzip, ffmpeg）をインストール
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full ffmpeg
+          sudo apt-get install -y p7zip-full unzip ffmpeg
 
-      # 3. リポジトリ内の .lzh ファイルを探して解凍
-      - name: Extract all .lzh files
+      # 4. リポジトリ内およびダウンロード済みの .lzh と .zip ファイルを探して解凍
+      - name: Extract all .lzh and .zip files
         run: |
-          # すべての .lzh ファイルを検索し、解凍先は一時ディレクトリ ./extracted_s3m/
-          mkdir -p extracted_s3m
-          # find コマンドでリポジトリ内 ./ にある .lzh をすべて対象
-          find . -type f -name "*.lzh" | while read lzhfile; do
-            echo "Extracting: $lzhfile"
-            # 解凍先は extracted_s3m/ 配下に、元の相対パスを保ったディレクトリを作成
-            outfile_dir="extracted_s3m/$(dirname "${lzhfile#./}")"
-            mkdir -p "$outfile_dir"
-            # p7zip (7z) で解凍
-            7z x "$lzhfile" -o"$outfile_dir"
+          # すべての .lzh/.zip ファイルを検索し、解凍先は一時ディレクトリ ./extracted_mods/
+          mkdir -p extracted_mods
+          # リポジトリ直下 (.) にある .lzh/.zip と、downloaded/ 以下にあるファイルも対象
+          find . \( -path "./.git" -prune \) -o -type f \( -name "*.lzh" -o -name "*.zip" \) | while read archive; do
+            echo "Extracting: $archive"
+            # 解凍先は extracted_mods/ 配下に、元の相対パスを保ったディレクトリを作成
+            dest_dir="extracted_mods/$(dirname "${archive#./}")"
+            mkdir -p "$dest_dir"
+            # 拡張子に応じて解凍方法を分岐
+            case "$archive" in
+              *.lzh)
+                7z x "$archive" -o"$dest_dir"
+                ;;
+              *.zip)
+                unzip -o "$archive" -d "$dest_dir"
+                ;;
+            esac
           done
 
-      # 4. 解凍されたフォルダ内の .s3m を探して .flac に変換
-      - name: Convert .s3m → .flac
+      # 5. 解凍されたフォルダ内の .s3m および .it を探して .flac に変換
+      - name: Convert .s3m and .it → .flac
         run: |
           # 出力ディレクトリを用意
           mkdir -p converted_flac
-          # extracted_s3m 内の .s3m をすべて検索
-          find extracted_s3m -type f -name "*.s3m" | while read s3mfile; do
-            echo "Converting: $s3mfile"
-            # 元の .s3m の相対パスを元に、converted_flac/ 以下に同じディレクトリ構造を作成
-            relpath="${s3mfile#extracted_s3m/}"
+          # extracted_mods 内の .s3m と .it をすべて検索して変換
+          find extracted_mods -type f \( -name "*.s3m" -o -name "*.it" \) | while read modfile; do
+            echo "Converting: $modfile"
+            # 元ファイルのパスから相対パスを取得
+            relpath="${modfile#extracted_mods/}"
             outdir="converted_flac/$(dirname "$relpath")"
             mkdir -p "$outdir"
-            # 拡張子を .flac に変更したファイル名を決定
-            filename_no_ext=$(basename "$s3mfile" .s3m)
+            # 拡張子を取り除いたファイル名を取得
+            filename_no_ext=$(basename "$modfile" | sed -E 's/\.(s3m|it)$//')
             outfile="$outdir/${filename_no_ext}.flac"
-            # ffmpeg で変換（入力は s3m、出力はフルクレートを指定）
-            ffmpeg -y -i "$s3mfile" -c:a flac "$outfile"
+            # ffmpeg で変換（入力: .s3m または .it、出力: FLAC）
+            ffmpeg -y -i "$modfile" -c:a flac "$outfile"
           done
 
-      # 5. 変換した .flac をリポジトリにコピー or 移動
+      # 6. 変換した .flac をリポジトリにコピー
       - name: Copy converted .flac into repository
         run: |
-          # ここでは converted_flac/ 以下の構造をそのままリポジトリ直下の flac_output/ にコピー
+          # converted_flac/ 以下の構造をそのままリポジトリ直下の flac_output/ にコピー
           mkdir -p flac_output
           rsync -av converted_flac/ flac_output/
 
-      # 6. Git ユーザー設定（デフォルト値を設定）
+      # 7. Git ユーザー設定（デフォルト値を設定）
       - name: Setup Git for commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 7. 変換結果をコミットしてプッシュ
+      # 8. 変換結果をコミットしてプッシュ
       - name: Commit and push converted FLAC files
         run: |
-          # ステータスを確認して、変更がなければ何もしない
+          # 変更があればコミットしてプッシュ
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
-            git commit -m "Add converted FLAC files from S3M (via GitHub Actions)"
+            git commit -m "Add converted FLAC files from S3M and IT (via GitHub Actions)"
             git push origin HEAD:${{ github.ref_name }}
           else
             echo "No changes detected in flac_output/. Nothing to commit."
