@@ -1,0 +1,83 @@
+# ファイル名: .github/workflows/convert_s3m_to_flac.yml
+name: LZH→S3M→FLAC 変換ワークフロー
+
+# 手動トリガー（必要に応じて push や pull_request に変更）
+on:
+  workflow_dispatch:
+
+jobs:
+  convert-and-commit:
+    name: LZH 解凍・S3M→FLAC 変換・コミット
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. リポジトリをチェックアウト
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: true  # 後続の git push に必要
+
+      # 2. 必要なツール（p7zip, ffmpeg）をインストール
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full ffmpeg
+
+      # 3. リポジトリ内の .lzh ファイルを探して解凍
+      - name: Extract all .lzh files
+        run: |
+          # すべての .lzh ファイルを検索し、解凍先は一時ディレクトリ ./extracted_s3m/
+          mkdir -p extracted_s3m
+          # find コマンドでリポジトリ内 ./ にある .lzh をすべて対象
+          find . -type f -name "*.lzh" | while read lzhfile; do
+            echo "Extracting: $lzhfile"
+            # 解凍先は extracted_s3m/ 配下に、元の相対パスを保ったディレクトリを作成
+            outfile_dir="extracted_s3m/$(dirname "${lzhfile#./}")"
+            mkdir -p "$outfile_dir"
+            # p7zip (7z) で解凍
+            7z x "$lzhfile" -o"$outfile_dir"
+          done
+
+      # 4. 解凍されたフォルダ内の .s3m を探して .flac に変換
+      - name: Convert .s3m → .flac
+        run: |
+          # 出力ディレクトリを用意
+          mkdir -p converted_flac
+          # extracted_s3m 内の .s3m をすべて検索
+          find extracted_s3m -type f -name "*.s3m" | while read s3mfile; do
+            echo "Converting: $s3mfile"
+            # 元の .s3m の相対パスを元に、converted_flac/ 以下に同じディレクトリ構造を作成
+            relpath="${s3mfile#extracted_s3m/}"
+            outdir="converted_flac/$(dirname "$relpath")"
+            mkdir -p "$outdir"
+            # 拡張子を .flac に変更したファイル名を決定
+            filename_no_ext=$(basename "$s3mfile" .s3m)
+            outfile="$outdir/${filename_no_ext}.flac"
+            # ffmpeg で変換（入力は s3m、出力はフルクレートを指定）
+            ffmpeg -y -i "$s3mfile" -c:a flac "$outfile"
+          done
+
+      # 5. 変換した .flac をリポジトリにコピー or 移動
+      - name: Copy converted .flac into repository
+        run: |
+          # ここでは converted_flac/ 以下の構造をそのままリポジトリ直下の flac_output/ にコピー
+          mkdir -p flac_output
+          rsync -av converted_flac/ flac_output/
+
+      # 6. Git ユーザー設定（デフォルト値を設定）
+      - name: Setup Git for commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # 7. 変換結果をコミットしてプッシュ
+      - name: Commit and push converted FLAC files
+        run: |
+          # ステータスを確認して、変更がなければ何もしない
+          if [ -n "$(git status --porcelain flac_output)" ]; then
+            git add flac_output/
+            git commit -m "Add converted FLAC files from S3M (via GitHub Actions)"
+            git push origin HEAD:${{ github.ref_name }}
+          else
+            echo "No changes detected in flac_output/. Nothing to commit."
+          fi
