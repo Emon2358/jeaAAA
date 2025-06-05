@@ -1,109 +1,91 @@
-name: LZH→ZIP→S3M/IT/RA→FLAC 変換ワークフロー
+name: LZH/RA ダウンロード・変換・コミット
 
-# 手動トリガー（workflow_dispatch）でURLを指定可能
 on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'ダウンロードしたいファイルのURL（オプション）'
-        required: false
-        default: ''
+        description: 'ダウンロードするファイルのURL（.lzh または .ra）'
+        required: true
+      format:
+        description: 'ファイル形式（lzh または ra）'
+        required: true
+        default: 'lzh'
+        type: choice
+        options:
+          - lzh
+          - ra
 
 jobs:
-  convert-and-commit:
-    name: ダウンロード＋LZH/ZIP 解凍・S3M/IT/RA→FLAC 変換・コミット
+  process:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. リポジトリをチェックアウト
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
-        with:
-          persist-credentials: true  # 後続の git push に必要
 
-      # 2. もし URL が指定されていれば、そのファイルをダウンロード
-      - name: Download file from provided URL
-        if: ${{ github.event.inputs.target_url != '' }}
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full unzip ffmpeg
+
+      - name: Download file
         run: |
           mkdir -p downloaded
           url="${{ github.event.inputs.target_url }}"
           filename=$(basename "$url")
           echo "Downloading: $url → downloaded/$filename"
           curl -L "$url" -o "downloaded/$filename"
-          # ダウンロードしたファイルをリポジトリ直下にもコピーして、以降の解凍ステップで見つかるようにする
-          cp "downloaded/$filename" .
 
-      # 3. 必要なツール（p7zip, unzip, ffmpeg）をインストール
-      - name: Install dependencies
+      - name: Extract .lzh if selected
+        if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full unzip ffmpeg
-
-      # 4. リポジトリ内およびダウンロード済みの .lzh と .zip ファイルを探して解凍
-      - name: Extract all .lzh and .zip files
-        run: |
-          mkdir -p extracted_mods
-          find . \( -path "./.git" -prune \) -o -type f \( -name "*.lzh" -o -name "*.zip" \) | while read archive; do
-            echo "Extracting: $archive"
-            dest_dir="extracted_mods/$(dirname "${archive#./}")"
-            mkdir -p "$dest_dir"
-            case "$archive" in
-              *.lzh)
-                7z x "$archive" -o"$dest_dir"
-                ;;
-              *.zip)
-                unzip -o "$archive" -d "$dest_dir"
-                ;;
-            esac
+          mkdir -p extracted
+          for file in downloaded/*.lzh; do
+            [ -f "$file" ] || continue
+            7z x "$file" -o"extracted"
           done
 
-      # 5. リポジトリ内および解凍先にある .s3m、.it、.ra を探して .flac に変換（CD品質）
-      - name: Convert .s3m, .it, .ra → .flac (CD品質)
+      - name: Convert .ra if selected
+        if: ${{ github.event.inputs.format == 'ra' }}
         run: |
           mkdir -p converted_flac
-          # 対象拡張子: .s3m, .it, .ra
-          find . -type f \( -name "*.s3m" -o -name "*.it" -o -name "*.ra" \) | while read infile; do
-            echo "Converting: $infile"
-            # ディレクトリ構造を保って出力先フォルダを作成
-            # 例: "extracted_mods/.../file.s3m" → "converted_flac/.../file.flac"
-            relpath="${infile#./}"
-            # .lzh/.zip から展開されたファイルは extracted_mods/ 以下にあるはずなので、
-            # "extracted_mods/..." を取り除いて相対パスを取得
-            relpath_clean="${relpath#extracted_mods/}"
-            outdir="converted_flac/$(dirname "$relpath_clean")"
-            mkdir -p "$outdir"
-            # 拡張子を除去したファイル名を取得
-            filename_no_ext=$(basename "$infile" | sed -E 's/\.(s3m|it|ra)$//')
-            outfile="$outdir/${filename_no_ext}.flac"
-            # ffmpeg で変換（CD品質: サンプルレート 44.1kHz, 16bit, ステレオ, 最大圧縮レベル）
+          find downloaded -type f -name "*.ra" | while read infile; do
+            filename=$(basename "$infile" .ra)
+            safe_filename=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            outfile="converted_flac/${safe_filename}.flac"
             ffmpeg -y -i "$infile" \
-              -ac 2 \               # ステレオ出力
-              -ar 44100 \           # サンプルレート 44.1kHz
-              -sample_fmt s16 \     # 16ビット（CD品質）
-              -c:a flac \           # FLAC コーデック
-              -compression_level 12 \# 最高圧縮（品質は非可逆だがFLAC自体は可逆）
+              -ac 2 -ar 44100 -sample_fmt s16 \
+              -c:a flac -compression_level 12 \
               "$outfile"
           done
 
-      # 6. 変換した .flac をリポジトリにコピー
-      - name: Copy converted .flac into repository
+      - name: Convert extracted LZH contents
+        if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
-          mkdir -p flac_output
-          rsync -av converted_flac/ flac_output/
+          mkdir -p converted_flac
+          find extracted -type f \( -iname "*.s3m" -o -iname "*.it" -o -iname "*.ra" \) | while read infile; do
+            filename=$(basename "$infile")
+            ext="${filename##*.}"
+            name="${filename%.*}"
+            safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9._-]/_/g')
+            outfile="converted_flac/${safe_name}.flac"
+            echo "Converting $infile → $outfile"
+            ffmpeg -y -i "$infile" \
+              -ac 2 -ar 44100 -sample_fmt s16 \
+              -c:a flac -compression_level 12 \
+              "$outfile"
+          done
 
-      # 7. Git ユーザー設定（デフォルト値を設定）
-      - name: Setup Git for commit
+      - name: Commit & push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p flac_output
+          rsync -av converted_flac/ flac_output/
 
-      # 8. 変換結果をコミットしてプッシュ
-      - name: Commit and push converted FLAC files
-        run: |
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
-            git commit -m "Add high-quality CD-level FLAC files from S3M, IT, RA (via GitHub Actions)"
-            git push origin HEAD:${{ github.ref_name }}
+            git commit -m "Add converted FLACs from ${{ github.event.inputs.format }}"
+            git push origin HEAD
           else
-            echo "No changes detected in flac_output/. Nothing to commit."
-          fi
+            echo "No changes to commit."
