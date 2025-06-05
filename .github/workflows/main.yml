@@ -51,6 +51,21 @@ jobs:
             esac
           done
 
+      # 4.5. リポジトリ内に既存の .it ファイルがあれば extracted/ にコピー
+      - name: Copy local .it files from repository to extracted/
+        run: |
+          # .git や downloaded、extracted、converted_flac、flac_output 以下は除外して検索
+          find . -type f -iname "*.it" \
+            -not -path "./.git/*" \
+            -not -path "./downloaded/*" \
+            -not -path "./extracted/*" \
+            -not -path "./converted_flac/*" \
+            -not -path "./flac_output/*" \
+            | while read repo_it; do
+                echo "Copying local .it file: $repo_it → extracted/"
+                cp "$repo_it" extracted/
+              done || echo "No local .it files to copy."
+
       # 5. extracted フォルダ内の .s3m および .it を CD品質 FLAC に変換
       - name: Convert .s3m/.it → .flac (CD品質)
         run: |
@@ -84,7 +99,7 @@ jobs:
         run: |
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
-            git commit -m "Add FLAC files converted from ModArchive S3M/IT"
+            git commit -m "Add FLAC files converted from ModArchive S3M/IT and local .it"
             git push origin HEAD:${{ github.ref_name }}
           else
             echo "No new FLAC files to commit."
