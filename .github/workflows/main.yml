@@ -1,4 +1,4 @@
-name: LZH/RA ダウンロード・変換・コミット
+name: LZH/RA → FLAC → 高音質化 (GitHub Actions)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
         description: 'ダウンロードするファイルの URL（.lzh または .ra）'
         required: true
       format:
-        description: 'ファイル形式（lzh または ra）'
+        description: 'ファイル形式 (lzh または ra)'
         required: true
         default: 'lzh'
         type: choice
@@ -16,22 +16,41 @@ on:
           - ra
 
 jobs:
-  process:
+  convert_and_enhance:
     runs-on: ubuntu-latest
 
     steps:
+      # ─────────────
       # 1. リポジトリをチェックアウト
-      - name: Checkout
+      # ─────────────
+      - name: Checkout repository
         uses: actions/checkout@v3
+        with:
+          persist-credentials: true
 
-      # 2. 必要ツールをインストール
-      - name: Install tools
+      # ─────────────
+      # 2. 必要なパッケージ・ツールをインストール
+      #    - Python (to run enhance_audio.py)
+      #    - pip ライブラリ (librosa, noisereduce, soundfile, numpy)
+      #    - p7zip, unzip, ffmpeg, curl, rsync
+      # ─────────────
+      - name: Setup Python and Install Dependencies
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install Python libraries
+        run: |
+          python -m pip install --upgrade pip
+          pip install librosa noisereduce soundfile numpy
+      - name: Install system tools
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full unzip ffmpeg curl rsync
 
-      # 3. ファイルをダウンロード
-      - name: Download file
+      # ─────────────
+      # 3. ダウンロード
+      # ─────────────
+      - name: Download file from URL
         run: |
           mkdir -p downloaded
           url="${{ github.event.inputs.target_url }}"
@@ -39,36 +58,44 @@ jobs:
           echo "Downloading: $url → downloaded/$filename"
           curl -L "$url" -o "downloaded/$filename"
 
-      # 4. .lzh を展開（format が lzh の場合のみ）
+      # ─────────────
+      # 4. LZH を展開（format が lzh の場合のみ）
+      # ─────────────
       - name: Extract .lzh if selected
         if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
           mkdir -p extracted
           for file in downloaded/*.lzh; do
             [ -f "$file" ] || continue
-            echo "Extracting: $file → extracted/"
+            echo "Extracting LZH: $file → extracted/"
             7z x "$file" -o"extracted"
           done
 
-      # 5. .ra を変換（format が ra の場合のみ）
-      - name: Convert .ra if selected
+      # ─────────────
+      # 5. RA を FLAC に変換（format が ra の場合のみ）
+      # ─────────────
+      - name: Convert .ra to FLAC if selected
         if: ${{ github.event.inputs.format == 'ra' }}
         run: |
           mkdir -p converted_flac
-          find downloaded -type f -name "*.ra" | while read infile; do
-            # ファイル名を安全化して .flac に変換
+          # downloaded/ にある .ra をすべて変換
+          find downloaded -type f -iname "*.ra" | while read infile; do
             filename=$(basename "$infile" .ra)
             safe_filename=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_filename}.flac"
-            echo "Converting (RA→FLAC): $infile → $outfile"
+            echo "Converting RA → FLAC: $infile → $outfile"
             ffmpeg -y -i "$infile" \
               -ac 2 -ar 44100 -sample_fmt s16 \
               -c:a flac -compression_level 12 \
               "$outfile"
           done
 
-      # 6. 展開済みフォルダ内の .s3m/.it/.ra を一括変換（format が lzh の場合のみ）
-      - name: Convert extracted LZH contents
+      # ─────────────
+      # 6. 展開済み LZH フォルダ内の各種モジュールを FLAC に変換
+      #    （.s3m / .it / .ra を高品質設定で変換）
+      #    ※format が lzh の場合のみ実行
+      # ─────────────
+      - name: Convert extracted LZH contents to FLAC
         if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
           mkdir -p converted_flac
@@ -77,27 +104,49 @@ jobs:
             name="${filename%.*}"
             safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_name}.flac"
-            echo "Converting (extracted → FLAC): $infile → $outfile"
+            echo "Converting extracted → FLAC: $infile → $outfile"
             ffmpeg -y -i "$infile" \
               -ac 2 -ar 44100 -sample_fmt s16 \
               -c:a flac -compression_level 12 \
               "$outfile"
           done
 
-      # 7. 変換結果をリポジトリにコピーしてコミット
-      - name: Commit & push
+      # ─────────────
+      # 7. Git 設定と変換結果のコミット前準備
+      # ─────────────
+      - name: Prepare Git user
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # ─────────────
+      # 8. 高音質化前の FLAC をリポジトリにコピー
+      # ─────────────
+      - name: Save converted FLAC to repo
+        run: |
           mkdir -p flac_output
           rsync -av converted_flac/ flac_output/
 
-          # 変更があればコミット
-          if [ -n "$(git status --porcelain flac_output)" ]; then
-            git add flac_output/
-            git commit -m "Add converted FLACs from ${{ github.event.inputs.format }}"
-            git push origin HEAD
+      # ─────────────
+      # 9. Python スクリプトで高音質化処理
+      #    → flac_output/ → flac_enhanced/
+      # ─────────────
+      - name: Run audio enhancement script
+        run: |
+          python enhance_audio.py \
+            --input-dir flac_output \
+            --output-dir flac_enhanced
+
+      # ─────────────
+      # 10. 高音質化済みファイルをコミットしてプッシュ
+      # ─────────────
+      - name: Commit & push high-quality FLACs
+        run: |
+          # flac_enhanced/ が存在しているかチェック
+          if [ -d "flac_enhanced" ] && [ -n "$(ls -A flac_enhanced)" ]; then
+            git add flac_output/ flac_enhanced/
+            git commit -m "Add FLAC (converted + enhanced) from ${{ github.event.inputs.format }}"
+            git push origin HEAD:${{ github.ref_name }}
           else
-            echo "No changes to commit."
+            echo "No enhanced files found under flac_enhanced/, skipping commit."
           fi
