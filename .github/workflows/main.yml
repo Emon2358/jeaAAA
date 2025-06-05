@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target_url:
-        description: 'ダウンロードするファイルのURL（.lzh または .ra）'
+        description: 'ダウンロードするファイルの URL（.lzh または .ra）'
         required: true
       format:
         description: 'ファイル形式（lzh または ra）'
@@ -20,14 +20,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. リポジトリをチェックアウト
       - name: Checkout
         uses: actions/checkout@v3
 
+      # 2. 必要ツールをインストール
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full unzip ffmpeg
+          sudo apt-get install -y p7zip-full unzip ffmpeg curl rsync
 
+      # 3. ファイルをダウンロード
       - name: Download file
         run: |
           mkdir -p downloaded
@@ -36,56 +39,65 @@ jobs:
           echo "Downloading: $url → downloaded/$filename"
           curl -L "$url" -o "downloaded/$filename"
 
+      # 4. .lzh を展開（format が lzh の場合のみ）
       - name: Extract .lzh if selected
         if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
           mkdir -p extracted
           for file in downloaded/*.lzh; do
             [ -f "$file" ] || continue
+            echo "Extracting: $file → extracted/"
             7z x "$file" -o"extracted"
           done
 
+      # 5. .ra を変換（format が ra の場合のみ）
       - name: Convert .ra if selected
         if: ${{ github.event.inputs.format == 'ra' }}
         run: |
           mkdir -p converted_flac
           find downloaded -type f -name "*.ra" | while read infile; do
+            # ファイル名を安全化して .flac に変換
             filename=$(basename "$infile" .ra)
             safe_filename=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_filename}.flac"
+            echo "Converting (RA→FLAC): $infile → $outfile"
             ffmpeg -y -i "$infile" \
               -ac 2 -ar 44100 -sample_fmt s16 \
               -c:a flac -compression_level 12 \
               "$outfile"
           done
 
+      # 6. 展開済みフォルダ内の .s3m/.it/.ra を一括変換（format が lzh の場合のみ）
       - name: Convert extracted LZH contents
         if: ${{ github.event.inputs.format == 'lzh' }}
         run: |
           mkdir -p converted_flac
           find extracted -type f \( -iname "*.s3m" -o -iname "*.it" -o -iname "*.ra" \) | while read infile; do
             filename=$(basename "$infile")
-            ext="${filename##*.}"
             name="${filename%.*}"
             safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_name}.flac"
-            echo "Converting $infile → $outfile"
+            echo "Converting (extracted → FLAC): $infile → $outfile"
             ffmpeg -y -i "$infile" \
               -ac 2 -ar 44100 -sample_fmt s16 \
               -c:a flac -compression_level 12 \
               "$outfile"
           done
 
+      # 7. 変換結果をリポジトリにコピーしてコミット
       - name: Commit & push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           mkdir -p flac_output
           rsync -av converted_flac/ flac_output/
 
+          # 変更があればコミット
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
             git commit -m "Add converted FLACs from ${{ github.event.inputs.format }}"
             git push origin HEAD
           else
             echo "No changes to commit."
+          fi
