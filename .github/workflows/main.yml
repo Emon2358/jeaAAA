@@ -41,14 +41,12 @@ jobs:
                 7z x "$file" -oextracted
                 ;;
               *.s3m|*.it|*.mod|*.xm|*.snd)
-                # ダウンロードが直接 .s3m などのモジュールファイルの場合はコピー
                 echo "  Copying module file: $file → extracted/"
                 cp "$file" extracted/
                 ;;
               *)
-                # それ以外はまず 7z で試みる。失敗したらスキップ
                 echo "  Trying 7z extract for unknown type: $file"
-                7z x "$file" -oextracted || echo "    Skipped (not an extractable archive): $file"
+                7z x "$file" -oextracted || echo "    Skipped (not an archive): $file"
                 ;;
             esac
           done
@@ -58,18 +56,11 @@ jobs:
         run: |
           mkdir -p converted_flac
           find extracted -type f -iname "*.s3m" | while read infile; do
-            # 拡張子を除いた安全なファイル名を作成
             filename=$(basename "$infile" .s3m)
             safe_name=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_name}.flac"
             echo "Converting: $infile → $outfile"
-            ffmpeg -y -i "$infile" \
-              -ac 2 \             # ステレオ
-              -ar 44100 \         # サンプルレート 44.1kHz
-              -sample_fmt s16 \   # 16bit
-              -c:a flac \         # FLAC コーデック
-              -compression_level 12 \
-              "$outfile"
+            ffmpeg -y -i "$infile" -ac 2 -ar 44100 -sample_fmt s16 -c:a flac -compression_level 12 "$outfile"
           done
 
       # 6. 変換結果をリポジトリにコピー
