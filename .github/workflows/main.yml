@@ -1,4 +1,4 @@
-name: Download RAW & Convert S3M → FLAC
+name: Download RAW & Convert S3M/IT → FLAC
 
 on:
   workflow_dispatch:
@@ -51,13 +51,17 @@ jobs:
             esac
           done
 
-      # 5. extracted フォルダ内の .s3m を CD品質 FLAC に変換
-      - name: Convert .s3m → .flac (CD品質)
+      # 5. extracted フォルダ内の .s3m および .it を CD品質 FLAC に変換
+      - name: Convert .s3m/.it → .flac (CD品質)
         run: |
           mkdir -p converted_flac
-          find extracted -type f -iname "*.s3m" | while read infile; do
-            filename=$(basename "$infile" .s3m)
-            safe_name=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          # *.s3m および *.it の両方を検索して処理
+          find extracted -type f \( -iname "*.s3m" -o -iname "*.it" \) | while read infile; do
+            # 拡張子を取り除いたベースファイル名を取得
+            filename=$(basename "$infile")
+            name="${filename%.*}"
+            # ファイル名中の問題文字をアンダースコアに置換して安全な名前にする
+            safe_name=$(echo "$name" | sed 's/[^a-zA-Z0-9._-]/_/g')
             outfile="converted_flac/${safe_name}.flac"
             echo "Converting: $infile → $outfile"
             ffmpeg -y -i "$infile" -ac 2 -ar 44100 -sample_fmt s16 -c:a flac -compression_level 12 "$outfile"
@@ -80,7 +84,7 @@ jobs:
         run: |
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
-            git commit -m "Add FLAC files converted from ModArchive S3M"
+            git commit -m "Add FLAC files converted from ModArchive S3M/IT"
             git push origin HEAD:${{ github.ref_name }}
           else
             echo "No new FLAC files to commit."
