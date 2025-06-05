@@ -1,4 +1,4 @@
-name: LZH→ZIP→S3M/IT→FLAC 変換ワークフロー
+name: LZH→ZIP→S3M/IT/RA→FLAC 変換ワークフロー
 
 # 手動トリガー（workflow_dispatch）でURLを指定可能
 on:
@@ -11,7 +11,7 @@ on:
 
 jobs:
   convert-and-commit:
-    name: ダウンロード＋LZH/ZIP 解凍・S3M/IT→FLAC 変換・コミット
+    name: ダウンロード＋LZH/ZIP 解凍・S3M/IT/RA→FLAC 変換・コミット
     runs-on: ubuntu-latest
 
     steps:
@@ -42,15 +42,11 @@ jobs:
       # 4. リポジトリ内およびダウンロード済みの .lzh と .zip ファイルを探して解凍
       - name: Extract all .lzh and .zip files
         run: |
-          # すべての .lzh/.zip ファイルを検索し、解凍先は一時ディレクトリ ./extracted_mods/
           mkdir -p extracted_mods
-          # リポジトリ直下 (.) にある .lzh/.zip と、downloaded/ 以下にあるファイルも対象
           find . \( -path "./.git" -prune \) -o -type f \( -name "*.lzh" -o -name "*.zip" \) | while read archive; do
             echo "Extracting: $archive"
-            # 解凍先は extracted_mods/ 配下に、元の相対パスを保ったディレクトリを作成
             dest_dir="extracted_mods/$(dirname "${archive#./}")"
             mkdir -p "$dest_dir"
-            # 拡張子に応じて解凍方法を分岐
             case "$archive" in
               *.lzh)
                 7z x "$archive" -o"$dest_dir"
@@ -61,29 +57,37 @@ jobs:
             esac
           done
 
-      # 5. 解凍されたフォルダ内の .s3m および .it を探して .flac に変換
-      - name: Convert .s3m and .it → .flac
+      # 5. リポジトリ内および解凍先にある .s3m、.it、.ra を探して .flac に変換（CD品質）
+      - name: Convert .s3m, .it, .ra → .flac (CD品質)
         run: |
-          # 出力ディレクトリを用意
           mkdir -p converted_flac
-          # extracted_mods 内の .s3m と .it をすべて検索して変換
-          find extracted_mods -type f \( -name "*.s3m" -o -name "*.it" \) | while read modfile; do
-            echo "Converting: $modfile"
-            # 元ファイルのパスから相対パスを取得
-            relpath="${modfile#extracted_mods/}"
-            outdir="converted_flac/$(dirname "$relpath")"
+          # 対象拡張子: .s3m, .it, .ra
+          find . -type f \( -name "*.s3m" -o -name "*.it" -o -name "*.ra" \) | while read infile; do
+            echo "Converting: $infile"
+            # ディレクトリ構造を保って出力先フォルダを作成
+            # 例: "extracted_mods/.../file.s3m" → "converted_flac/.../file.flac"
+            relpath="${infile#./}"
+            # .lzh/.zip から展開されたファイルは extracted_mods/ 以下にあるはずなので、
+            # "extracted_mods/..." を取り除いて相対パスを取得
+            relpath_clean="${relpath#extracted_mods/}"
+            outdir="converted_flac/$(dirname "$relpath_clean")"
             mkdir -p "$outdir"
-            # 拡張子を取り除いたファイル名を取得
-            filename_no_ext=$(basename "$modfile" | sed -E 's/\.(s3m|it)$//')
+            # 拡張子を除去したファイル名を取得
+            filename_no_ext=$(basename "$infile" | sed -E 's/\.(s3m|it|ra)$//')
             outfile="$outdir/${filename_no_ext}.flac"
-            # ffmpeg で変換（入力: .s3m または .it、出力: FLAC）
-            ffmpeg -y -i "$modfile" -c:a flac "$outfile"
+            # ffmpeg で変換（CD品質: サンプルレート 44.1kHz, 16bit, ステレオ, 最大圧縮レベル）
+            ffmpeg -y -i "$infile" \
+              -ac 2 \               # ステレオ出力
+              -ar 44100 \           # サンプルレート 44.1kHz
+              -sample_fmt s16 \     # 16ビット（CD品質）
+              -c:a flac \           # FLAC コーデック
+              -compression_level 12 \# 最高圧縮（品質は非可逆だがFLAC自体は可逆）
+              "$outfile"
           done
 
       # 6. 変換した .flac をリポジトリにコピー
       - name: Copy converted .flac into repository
         run: |
-          # converted_flac/ 以下の構造をそのままリポジトリ直下の flac_output/ にコピー
           mkdir -p flac_output
           rsync -av converted_flac/ flac_output/
 
@@ -96,10 +100,9 @@ jobs:
       # 8. 変換結果をコミットしてプッシュ
       - name: Commit and push converted FLAC files
         run: |
-          # 変更があればコミットしてプッシュ
           if [ -n "$(git status --porcelain flac_output)" ]; then
             git add flac_output/
-            git commit -m "Add converted FLAC files from S3M and IT (via GitHub Actions)"
+            git commit -m "Add high-quality CD-level FLAC files from S3M, IT, RA (via GitHub Actions)"
             git push origin HEAD:${{ github.ref_name }}
           else
             echo "No changes detected in flac_output/. Nothing to commit."
