@@ -20,19 +20,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full ffmpeg curl rsync
 
-      # 3. ModArchive から RAW をダウンロード
+      # 3. ModArchive から RAW をダウンロード（リモートのファイル名を維持）
       - name: Download RAW from ModArchive
         run: |
           mkdir -p downloaded
-          # ModArchive のダウンロードURLを直接指定
-          curl -L "https://api.modarchive.org/downloads.php?moduleid=74080" -o downloaded/raw_mod
+          cd downloaded
+          # -J -O オプションで Content-Disposition ヘッダーからファイル名を取得して保存
+          curl -L -J -O "https://api.modarchive.org/downloads.php?moduleid=74080"
+          cd ..
 
-      # 4. ダウンロードした RAW を解凍（7z が自動で形式判別）
-      - name: Extract downloaded RAW
+      # 4. ダウンロードしたファイルを extracted/ に展開またはコピー
+      - name: Extract or copy downloaded file
         run: |
           mkdir -p extracted
-          echo "Extracting downloaded/raw_mod → extracted/"
-          7z x downloaded/raw_mod -oextracted
+          for file in downloaded/*; do
+            echo "Processing downloaded file: $file"
+            case "$file" in
+              *.zip|*.lzh|*.rar|*.7z)
+                echo "  Extracting archive: $file → extracted/"
+                7z x "$file" -oextracted
+                ;;
+              *.s3m|*.it|*.mod|*.xm|*.snd)
+                # ダウンロードが直接 .s3m などのモジュールファイルの場合はコピー
+                echo "  Copying module file: $file → extracted/"
+                cp "$file" extracted/
+                ;;
+              *)
+                # それ以外はまず 7z で試みる。失敗したらスキップ
+                echo "  Trying 7z extract for unknown type: $file"
+                7z x "$file" -oextracted || echo "    Skipped (not an extractable archive): $file"
+                ;;
+            esac
+          done
 
       # 5. extracted フォルダ内の .s3m を CD品質 FLAC に変換
       - name: Convert .s3m → .flac (CD品質)
